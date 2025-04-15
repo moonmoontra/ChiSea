@@ -174,6 +174,13 @@ st.title("🏫 Система оптимальної розсадки учнів
 
 st.logo("stul.png")
 
+st.markdown(
+    """
+    <link rel="icon" href="stul.png" type="image/png">
+    """,
+    unsafe_allow_html=True
+)
+
 # Завантаження даних з файлу
 saved_students, saved_preferences, saved_history = load_data()
 
