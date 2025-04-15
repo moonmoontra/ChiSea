@@ -172,8 +172,6 @@ st.set_page_config(page_title="Система розсадки учнів", layo
 
 st.title("🏫 Система оптимальної розсадки учнів")
 
-st.logo("stul.png")
-
 # Завантаження даних з файлу
 saved_students, saved_preferences, saved_history = load_data()
 
