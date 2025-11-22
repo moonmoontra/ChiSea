@@ -5,6 +5,7 @@ import random
 from collections import defaultdict
 import json
 import os
+import io  # <--- Додайте цей імпорт
 
 
 class SeatingArrangement:
@@ -345,6 +346,10 @@ with tab1:
 with tab2:
     st.header("🪑 Створення розсадки")
 
+    # Ініціалізація списку заборонених пар
+    if 'forbidden_pairs' not in st.session_state:
+        st.session_state['forbidden_pairs'] = []
+
     if not students:
         st.warning("Спершу додайте список учнів у бічній панелі")
     elif len(saved_preferences) < len(students):
@@ -352,152 +357,267 @@ with tab2:
     else:
         st.subheader("Генерація нової розсадки")
 
-        # Додаємо опцію налаштування параметрів
-        with st.expander("Налаштування алгоритму"):
-            randomness = st.slider(
-                "Рівень випадковості (0-100%)",
-                min_value=0,
-                max_value=100,
-                value=30,
-                help="Чим вище значення, тим більша випадковість при розсадці"
-            )
+        col_settings_1, col_settings_2 = st.columns(2)
 
-            penalty = st.slider(
-                "Штраф за повторні розсадки (1-10)",
-                min_value=1,
-                max_value=10,
-                value=5,
-                help="Чим вище значення, тим менша ймовірність, що учні сидітимуть разом повторно"
-            )
+        with col_settings_1:
+            # Налаштування алгоритму
+            with st.expander("⚙️ Налаштування алгоритму", expanded=False):
+                randomness = st.slider(
+                    "Рівень випадковості (0-100%)",
+                    min_value=0,
+                    max_value=100,
+                    value=30
+                )
+                penalty = st.slider(
+                    "Штраф за повторні розсадки (1-10)",
+                    min_value=1,
+                    max_value=10,
+                    value=5
+                )
 
-        if st.button("Створити нову розсадку", type="primary"):
-            # Створюємо розсадку
+            # Блок заборонених пар
+            with st.expander("⛔ Хто НЕ МОЖЕ сидіти разом", expanded=True):
+                f_col1, f_col2, f_col3 = st.columns([3, 3, 2.5])
+                with f_col1:
+                    bad_pair_1 = st.selectbox("Учень 1", students, key="bp_1", label_visibility="collapsed")
+                with f_col2:
+                    bad_pair_2 = st.selectbox("Учень 2", [s for s in students if s != bad_pair_1], key="bp_2",
+                                              label_visibility="collapsed")
+                with f_col3:
+                    if st.button("⛔ Заборонити", key="btn_forbid", use_container_width=True):
+                        exists = False
+                        current_pair_set = {bad_pair_1, bad_pair_2}
+                        for p1, p2 in st.session_state['forbidden_pairs']:
+                            if {p1, p2} == current_pair_set:
+                                exists = True
+                                break
+                        if not exists:
+                            st.session_state['forbidden_pairs'].append((bad_pair_1, bad_pair_2))
+                            st.rerun()
+
+                if st.session_state['forbidden_pairs']:
+                    st.markdown("---")
+                    pairs_to_remove = []
+                    for idx, (p1, p2) in enumerate(st.session_state['forbidden_pairs']):
+                        p_col1, p_col2 = st.columns([0.85, 0.15])
+                        with p_col1:
+                            st.markdown(f":no_entry_sign: **{p1}** — **{p2}**")
+                        with p_col2:
+                            if st.button("🗑️", key=f"del_pair_{idx}"):
+                                pairs_to_remove.append(idx)
+                    if pairs_to_remove:
+                        for idx in sorted(pairs_to_remove, reverse=True):
+                            st.session_state['forbidden_pairs'].pop(idx)
+                        st.rerun()
+
+        with col_settings_2:
+            # Налаштування старости
+            with st.expander("⭐ Налаштування старости", expanded=True):
+                use_starosta = st.checkbox("Призначити місце старости вручну")
+                starosta = None
+                starosta_neighbor = None
+                if use_starosta:
+                    starosta = st.selectbox("Хто староста?", students, key="starosta_select")
+                    potential_neighbors = [s for s in students if s != starosta]
+                    starosta_neighbor = st.selectbox("З ким сидить староста?", potential_neighbors,
+                                                     key="starosta_neighbor_select")
+                    st.info(f"Пара {starosta} + {starosta_neighbor} буде закріплена.")
+
+        st.markdown("---")
+
+        if st.button("Створити нову розсадку", type="primary", use_container_width=True):
+            # Логіка генерації розсадки
             seating = SeatingArrangement(students)
-
-            # Додаємо переваги
             for student, prefs in saved_preferences.items():
                 seating.add_student_preferences(student, prefs)
-
-            # Завантажуємо історію розсадок
             for past_arrangement in saved_history:
                 seating.update_recent_seatings(past_arrangement)
 
 
-            # Застосовуємо налаштування
-            # Змінюємо рівень випадковості
             def optimize_seating_custom(self):
                 available_students = set(self.students)
                 arrangement = []
 
-                # Спочатку формуємо можливі пари та сортуємо їх за оцінкою
+                # 1. Староста
+                if use_starosta and starosta and starosta_neighbor:
+                    if starosta in available_students and starosta_neighbor in available_students:
+                        arrangement.append((starosta, starosta_neighbor))
+                        available_students.remove(starosta)
+                        available_students.remove(starosta_neighbor)
+
+                # 2. Решта пар
                 all_possible_pairs = []
-                for i, student1 in enumerate(self.students):
-                    for j, student2 in enumerate(self.students[i + 1:], i + 1):
-                        score = self.compute_seating_score((student1, student2))
-                        all_possible_pairs.append((student1, student2, score))
+                remaining_list = list(available_students)
+                for i, s1 in enumerate(remaining_list):
+                    for j, s2 in enumerate(remaining_list[i + 1:], i + 1):
+                        # Перевірка заборони
+                        if any({s1, s2} == {p1, p2} for p1, p2 in st.session_state['forbidden_pairs']):
+                            continue
+                        score = self.compute_seating_score((s1, s2))
+                        all_possible_pairs.append((s1, s2, score))
 
-                # Сортуємо пари за оцінкою (від вищої до нижчої)
                 all_possible_pairs.sort(key=lambda x: x[2], reverse=True)
+                if all_possible_pairs:
+                    count = int(len(all_possible_pairs) * randomness / 100)
+                    random.shuffle(all_possible_pairs[:max(1, count)])
 
-                # Додаємо випадковість, штраф за повторні розсадки
-                shuffle_count = int(len(all_possible_pairs) * randomness / 100)
-                random.shuffle(all_possible_pairs[:max(1, shuffle_count)])
+                for s1, s2, score in all_possible_pairs:
+                    if s1 in available_students and s2 in available_students:
+                        arrangement.append((s1, s2))
+                        available_students.remove(s1)
+                        available_students.remove(s2)
 
-                # Створюємо розсадку
-                for student1, student2, score in all_possible_pairs:
-                    if student1 in available_students and student2 in available_students:
-                        arrangement.append((student1, student2))
-                        available_students.remove(student1)
-                        available_students.remove(student2)
-
-                # Якщо залишився непарний учень, він сидить сам
-                if available_students:
-                    arrangement.append((list(available_students)[0],))
-
+                # Одинаки
+                while available_students:
+                    s = list(available_students)[0]
+                    available_students.remove(s)
+                    found = False
+                    if available_students:
+                        for partner in list(available_students):
+                            if not any({s, partner} == {p1, p2} for p1, p2 in st.session_state['forbidden_pairs']):
+                                arrangement.append((s, partner))
+                                available_students.remove(partner)
+                                found = True
+                                break
+                    if not found:
+                        arrangement.append((s,))
                 return arrangement
 
 
-            # Перевизначаємо метод для обчислення оцінки з кастомним штрафом
-            def compute_seating_score_custom(self, pair):
-                student1, student2 = pair
-                idx1 = self.students.index(student1)
-                idx2 = self.students.index(student2)
-
-                # Основна оцінка на основі пріоритетів
+            def compute_score_custom(self, pair):
+                s1, s2 = pair
+                idx1, idx2 = self.students.index(s1), self.students.index(s2)
                 score = self.weight_matrix[idx1, idx2] + self.weight_matrix[idx2, idx1]
-
-                # Штраф, якщо учні вже сиділи разом нещодавно
-                if student2 in self.recent_seatings[student1]:
+                if s2 in self.recent_seatings[s1]:
                     score -= penalty
-
                 return score
 
 
-            # Застосовуємо кастомні методи
             seating.optimize_seating = lambda: optimize_seating_custom(seating)
-            seating.compute_seating_score = lambda pair: compute_seating_score_custom(seating, pair)
+            seating.compute_seating_score = lambda pair: compute_score_custom(seating, pair)
 
-            # Генеруємо нову розсадку
             new_arrangement = seating.generate_new_arrangement()
-
-            # Зберігаємо в історію
             saved_history.append(new_arrangement)
             save_data(students, saved_preferences, saved_history)
-
             st.success("Нову розсадку створено!")
 
-            # Відображаємо нову розсадку
+            # Відображення
             st.subheader("Розсадка на цей тиждень:")
 
-            seating_data = []
-            for i, pair in enumerate(new_arrangement, 1):
-                if len(pair) == 2:
-                    seating_data.append([i, pair[0], pair[1]])
+            FIXED_DESKS_COUNT = 15
+            display_arrangement = new_arrangement[:]
+            while len(display_arrangement) < FIXED_DESKS_COUNT:
+                display_arrangement.append(None)
+
+            # Таблиця для перегляду в UI
+            ui_data = []
+            for i, pair in enumerate(display_arrangement, 1):
+                if pair is None:
+                    ui_data.append([i, "---", "---"])
+                elif len(pair) == 2:
+                    ui_data.append([i, pair[0], pair[1]])
                 else:
-                    seating_data.append([i, pair[0], "---"])
+                    ui_data.append([i, pair[0], "---"])
+            st.dataframe(pd.DataFrame(ui_data, columns=["Парта", "Учень 1", "Учень 2"]), use_container_width=True)
 
-            df = pd.DataFrame(seating_data, columns=["Парта", "Учень 1", "Учень 2"])
-            st.dataframe(df, use_container_width=True)
-
-            # Візуалізація розсадки у вигляді таблиці або схеми класу
+            # Схема HTML
             st.subheader("Схема розсадки у класі")
-
-            # Створюємо сітку для візуалізації
-            max_rows = 5  # 4 парти в ряд
-
-            # Візуалізуємо схему класу
             desk_html = "<div style='text-align:center; margin-bottom:20px;'><strong>ВЧИТЕЛЬ</strong></div>"
             desk_html += "<div style='display:flex; justify-content:center;'>"
-            desk_html += "<div style='border:2px solid black; padding:10px; text-align:center; margin:5px;'>Дошка</div>"
-            desk_html += "</div><br>"
+            desk_html += "<div style='border:2px solid black; padding:10px; width:300px; text-align:center; background:white;'>Дошка</div></div><br>"
 
-            for row in range(max_rows):
+            for row in range(5):
                 desk_html += "<div style='display:flex; justify-content:center;'>"
                 for col in range(3):
-                    desk_idx = row * 3 + col
-                    if desk_idx < len(new_arrangement):
-                        pair = new_arrangement[desk_idx]
-                        if len(pair) == 2:
-                            desk_html += f"<div style='border:2px solid #4285F4; color: black; padding:10px; width:150px; height:80px; margin:10px; text-align:center; background-color:#E8F0FE; border-radius:5px;'>"
-                            desk_html += f"<div>{pair[0]}</div><hr style='margin:5px 0;'><div>{pair[1]}</div>"
-                        else:
-                            desk_html += f"<div style='border:2px solid #4285F4; padding:10px; width:150px; height:80px; margin:10px; text-align:center; background-color:#E8F0FE; border-radius:5px;'>"
-                            desk_html += f"<div>{pair[0]}</div><hr style='margin:5px 0;'><div>---</div>"
-                        desk_html += "</div>"
+                    idx = row * 3 + col
+                    pair = display_arrangement[idx] if idx < len(display_arrangement) else None
+
+                    if pair is None:
+                        border, bg, style = "#ccc", "#f9f9f9", "dashed"
+                        content = "<div style='color:#aaa;'>Вільна</div><hr style='border-top:1px dashed #ccc; margin:5px 0;'><div style='color:#aaa;'>Вільна</div>"
+                    else:
+                        style = "solid"
+                        is_starosta = False
+                        if use_starosta and len(pair) == 2:
+                            if {pair[0], pair[1]} == {starosta, starosta_neighbor}: is_starosta = True
+                        border = "#F4B400" if is_starosta else "#4285F4"
+                        bg = "#FFF8E1" if is_starosta else "#E8F0FE"
+                        p2_name = pair[1] if len(pair) > 1 else "---"
+                        content = f"<div>{pair[0]}</div><hr style='border-color:{border}; margin:5px 0;'><div>{p2_name}</div>"
+
+                    desk_html += f"<div style='border:2px {style} {border}; bg:{bg}; width:150px; height:90px; margin:10px; padding:10px; border-radius:8px; background-color:{bg}; text-align:center; display:flex; flex-direction:column; justify-content:center; color:black;'>{content}</div>"
                 desk_html += "</div>"
+            st.html(desk_html)
 
-            st.markdown(desk_html, unsafe_allow_html=True)
+            # --- ЕКСПОРТ В EXCEL (Шаблон) ---
+            # Готуємо дані для Excel у форматі шаблону (3 колонки парт, 5 рядів)
+            excel_data = []
 
-            # Додаємо можливість експорту
-            csv = df.to_csv(index=False).encode('utf-8')
+            # Заголовки (верхні)
+            excel_data.append(["", "ДВЕРІ", "", "", "ЦЕНТР", "", "", "ВІКНА", "", ""])
+            excel_data.append(["", "1", "", "", "2", "", "", "3", "", ""])
+
+            # Ряди парт (від 5 до 1, тобто від задніх до передніх)
+            # Логіка: Індекс 0-2 це Row 1 (передні), 12-14 це Row 5 (задні)
+            for r in range(5, 0, -1):  # 5, 4, 3, 2, 1
+                row_idx = r - 1
+                desk_start_idx = row_idx * 3
+
+                # Отримуємо пари для Лівого, Центрального та Правого ряду
+                pairs_in_row = []
+                for i in range(3):
+                    d_idx = desk_start_idx + i
+                    pair = display_arrangement[d_idx] if d_idx < len(display_arrangement) else None
+
+                    s1, s2 = "", ""
+                    if pair:
+                        s1 = pair[0]
+                        if len(pair) > 1:
+                            s2 = pair[1]
+                    pairs_in_row.append((s1, s2))
+
+                left, center, right = pairs_in_row[0], pairs_in_row[1], pairs_in_row[2]
+
+                # Формуємо рядок: [Row#, L1, L2, Row#, C1, C2, Row#, R1, R2, Row#]
+                excel_row = [
+                    str(r), left[0], left[1],
+                    str(r), center[0], center[1],
+                    str(r), right[0], right[1],
+                    str(r)
+                ]
+                excel_data.append(excel_row)
+
+            # Заголовки (нижні, повторюються)
+            excel_data.append(["", "1", "", "", "2", "", "", "3", "", ""])
+            excel_data.append(["", "ДВЕРІ", "", "", "ЦЕНТР", "", "", "ВІКНА", "", ""])
+
+            # Створюємо DataFrame
+            df_excel = pd.DataFrame(excel_data)
+
+            # Зберігаємо в буфер
+            buffer = io.BytesIO()
+            with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+                df_excel.to_excel(writer, index=False, header=False, sheet_name='Rozsadka')
+
+                # Автоматичне налаштування ширини колонок (опціонально)
+                worksheet = writer.sheets['Rozsadka']
+                worksheet.set_column('A:A', 3)  # Вузькі колонки для номерів
+                worksheet.set_column('D:D', 3)
+                worksheet.set_column('G:G', 3)
+                worksheet.set_column('J:J', 3)
+                worksheet.set_column('B:C', 15)  # Ширші для імен
+                worksheet.set_column('E:F', 15)
+                worksheet.set_column('H:I', 15)
+
+            buffer.seek(0)
+
             st.download_button(
-                "Завантажити розсадку як CSV",
-                csv,
-                "rozсadka.csv",
-                "text/csv",
-                key='download-csv'
+                label="📥 Завантажити Excel (Шаблон)",
+                data=buffer,
+                file_name="rozsadka_template.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
             )
-
 # Вкладка для історії розсадок
 with tab3:
     st.header("📜 Історія розсадок")
